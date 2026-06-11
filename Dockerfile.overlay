@@ -1,6 +1,8 @@
 # Thin hardened overlay over upstream vogler/free-games-claimer:dev
-# Adds: #562 entrypoint self-heal, reconciled platform scripts, GOG Gmail-IMAP 2FA reader.
+# Adds: #562 entrypoint self-heal, reconciled platform scripts (+matching src/ to avoid
+# version skew), GOG Gmail-IMAP 2FA reader.
 FROM ghcr.io/vogler/free-games-claimer:dev
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY src/ /fgc/src/
 COPY gog.js epic-games.js prime-gaming.js gog-imap-code.py /fgc/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

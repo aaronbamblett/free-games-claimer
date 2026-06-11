@@ -7,6 +7,7 @@
 # model: a hung or crashed run can never become an infinite restart loop, and every run yields a
 # real exit code + a parsed summary. Schedule this daily (TrueNAS cron / systemd timer).
 set -uo pipefail
+export PATH="/usr/bin:/usr/sbin:/bin:/sbin:${PATH:-}"   # cron runs with a minimal env
 
 APPDIR="${FGC_APPDIR:-/mnt/pool/appdata/free-games-claimer}"
 DATA="$APPDIR/data"
