@@ -306,7 +306,21 @@ try {
       }
 
       // Playwright clicked before button was ready to handle event, https://github.com/vogler/free-games-claimer/issues/84#issuecomment-1474346591
-      await iframe.locator('button:has-text("Add to library"):not(:has(.payment-loading--loading))').click({ delay: 11 });
+      for (let attempt = 0; attempt < 60; attempt++) { // Epic varies the checkout button text/state; poll for either label
+        const clicked = await iframe.locator('body').evaluate(() => {
+          const button = [...document.querySelectorAll('button')].find(b => {
+            const text = (b.innerText || b.textContent || '').trim();
+            const loading = b.querySelector('.payment-loading--loading');
+            return !loading && !b.disabled && (text.includes('Add to library') || text.includes('Place Order'));
+          });
+          if (!button) return false;
+          button.click();
+          return true;
+        }).catch(() => false);
+        if (clicked) break;
+        if (attempt == 59) throw new Error('Could not find checkout submit button');
+        await page.waitForTimeout(1000);
+      }
 
       // I Agree button is only shown for EU accounts! https://github.com/vogler/free-games-claimer/pull/7#issuecomment-1038964872
       const btnAgree = iframe.locator('button:has-text("I Accept")');
@@ -330,7 +344,7 @@ try {
           console.error('  Failed to challenge captcha, please try again later.');
           await notify('epic-games: failed to challenge captcha. Please check.');
         }).catch(_ => { });
-        await page.locator("text=It's all yours").waitFor({ state: 'attached' }); // TODO Bundle: got stuck here, but normal game now as well
+        await page.locator("text=Thanks for your order!, text=It's all yours, text=In Library").waitFor({ state: 'attached' }); // Epic changed free checkout success copy in 2026.
         game.status = 'claimed';
         game.time = datetime(); // claimed time overwrites failed/dryrun time
         console.log('  Claimed successfully!');

@@ -52,7 +52,14 @@ try {
   // TODO for the below signIn.waitFor(), patchright failed most of the time with: locator.waitFor: JSHandles can be evaluated only in the context they were created!
   // await Promise.any([signIn.waitFor(), page.waitForSelector('#menuUsername')]);
   const username = page.locator('#menuUsername').first();
-  while (await signIn.isVisible() && !await username.isVisible()) {
+  const isVisibleSelector = async selector => page.evaluate(sel => {
+    const el = document.querySelector(sel);
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  }, selector).catch(() => false);
+  while (await signIn.isVisible().catch(() => false) && !await isVisibleSelector('#menuUsername')) {
     console.error('Not signed!');
     if (cfg.nowait) process.exit(1);
     await signIn.click();

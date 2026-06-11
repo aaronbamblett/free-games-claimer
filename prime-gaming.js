@@ -88,7 +88,7 @@ try {
     await page.waitForURL(`${BASE_URL}/claims/home?signedIn=true`);
     if (!cfg.debug) context.setDefaultTimeout(cfg.timeout);
   }
-  user = await page.locator('[data-a-target="user-dropdown-first-name-text"]').first().innerText();
+  user = await page.evaluate(() => document.querySelector('[data-a-target="user-dropdown-first-name-text"]')?.textContent?.trim() || 'Prime user');
   console.log(`Signed in as ${user}`);
   // await page.click('button[aria-label="User dropdown and more options"]');
   // const twitch = await page.locator('[data-a-target="TwitchDisplayName"]').first().innerText();
