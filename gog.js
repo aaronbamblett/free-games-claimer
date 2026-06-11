@@ -72,13 +72,24 @@ try {
         await iframe.locator('#login_username').fill(email);
       }
       await iframe.locator('#login_password').fill(password);
+      const otpAfter = Date.now(); // hardened fork: floor for Gmail 2FA-code freshness
       await iframe.locator('#login_login').click();
       await page.waitForTimeout(2000); // TODO patchright waits forever for MFA locator otherwise
       // handle MFA, but don't await it
       iframe.locator('form[name=second_step_authentication]').waitFor().then(async () => {
         console.log('Two-Step Verification - Enter security code');
         console.log(await iframe.locator('.form__description').innerText());
-        const otp = await prompt({ type: 'text', message: 'Enter two-factor sign in code', validate: n => n.toString().length == 4 || 'The code must be 4 digits!' }); // can't use type: 'number' since it strips away leading zeros and codes sometimes have them
+        let otp; // hardened fork: try Gmail IMAP auto-read, else manual prompt via noVNC
+        if (process.env.GMAIL_APP_PASSWORD) {
+          console.log('Fetching GOG 2FA code from Gmail via IMAP...');
+          try {
+            const { execFileSync } = await import('child_process');
+            const got = execFileSync('python3', ['/fgc/gog-imap-code.py', '--after', String(Math.floor(otpAfter / 1000)), '--timeout', '120'], { encoding: 'utf8' }).trim();
+            if (/^\d{4}$/.test(got)) { otp = got; console.log('Got GOG 2FA code from Gmail.'); }
+            else console.log('Gmail returned no usable GOG code; falling back to manual.');
+          } catch (e) { console.log('Gmail GOG code fetch failed:', (e && e.message ? e.message.split('\n')[0] : e)); }
+        }
+        if (!otp) otp = await prompt({ type: 'text', message: 'Enter two-factor sign in code', validate: n => n.toString().length == 4 || 'The code must be 4 digits!' }); // codes can have leading zeros, keep as text
         await iframe.locator('#second_step_authentication_token_letter_1').pressSequentially(otp.toString(), { delay: 10 });
         await iframe.locator('#second_step_authentication_send').click();
         await page.waitForTimeout(1000); // TODO still needed with wait for username below?
