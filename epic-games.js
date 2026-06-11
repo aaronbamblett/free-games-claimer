@@ -344,7 +344,7 @@ try {
           console.error('  Failed to challenge captcha, please try again later.');
           await notify('epic-games: failed to challenge captcha. Please check.');
         }).catch(_ => { });
-        await page.locator("text=Thanks for your order!, text=It's all yours, text=In Library").waitFor({ state: 'attached' }); // Epic changed free checkout success copy in 2026.
+        await page.locator("text=/Thanks for your order!|It.s all yours|In Library/").waitFor({ state: 'attached' }); // Epic changed free checkout success copy in 2026.
         game.status = 'claimed';
         game.time = datetime(); // claimed time overwrites failed/dryrun time
         console.log('  Claimed successfully!');
