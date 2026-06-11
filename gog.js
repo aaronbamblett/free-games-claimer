@@ -59,7 +59,7 @@ try {
     const rect = el.getBoundingClientRect();
     return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
   }, selector).catch(() => false);
-  while (await signIn.isVisible().catch(() => false) && !await isVisibleSelector('#menuUsername')) {
+  while (await signIn.isVisible().catch(() => false) && !await isVisibleSelector('.js-menu-account')) {
     console.error('Not signed!');
     if (cfg.nowait) process.exit(1);
     await signIn.click();
@@ -97,7 +97,12 @@ try {
           } catch (e) { console.log('Gmail GOG code fetch failed:', (e && e.message ? e.message.split('\n')[0] : e)); }
         }
         if (!otp) otp = await prompt({ type: 'text', message: 'Enter two-factor sign in code', validate: n => n.toString().length == 4 || 'The code must be 4 digits!' }); // codes can have leading zeros, keep as text
-        await iframe.locator('#second_step_authentication_token_letter_1').pressSequentially(otp.toString(), { delay: 10 });
+        const otpDigits = otp.toString().split(''); // GOG's 4 code boxes don't auto-advance for Playwright -> fill each box individually
+        for (let i = 0; i < otpDigits.length; i++) {
+          const box = iframe.locator(`#second_step_authentication_token_letter_${i + 1}`);
+          await box.click();
+          await box.pressSequentially(otpDigits[i], { delay: 30 });
+        }
         await iframe.locator('#second_step_authentication_send').click();
         await page.waitForTimeout(1000); // TODO still needed with wait for username below?
       }).catch(_ => { });
@@ -108,7 +113,7 @@ try {
         notify('gog: got captcha during login. Please check.');
         // TODO solve reCAPTCHA?
       }).catch(_ => { });
-      await page.waitForSelector('#menuUsername');
+      await page.waitForSelector('.js-menu-account', { state: 'attached' }); // logged-in element exists but GOG renders it hidden -> wait attached, not visible
     } else {
       console.log('Waiting for you to login in the browser.');
       await notify('gog: no longer signed in and not enough options set for automatic login.');
@@ -118,10 +123,10 @@ try {
         process.exit(1);
       }
     }
-    await page.waitForSelector('#menuUsername');
+    await page.waitForSelector('.js-menu-account', { state: 'attached' }); // logged-in element exists but GOG renders it hidden -> wait attached, not visible
     if (!cfg.debug) context.setDefaultTimeout(cfg.timeout);
   }
-  user = await page.locator('#menuUsername').first().textContent(); // innerText is uppercase due to styling!
+  user = (await page.locator('.menu-account__user-name').first().textContent().catch(() => null) || '').trim() || 'gog-user';
   console.log(`Signed in as ${user}`);
   db.data[user] ||= {};
 
