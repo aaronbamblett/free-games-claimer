@@ -1,0 +1,5 @@
+# Thin hardened overlay over upstream vogler/free-games-claimer:dev
+# Adds the #562 entrypoint self-heal (and later: GOG IMAP 2FA reader).
+FROM ghcr.io/vogler/free-games-claimer:dev
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh

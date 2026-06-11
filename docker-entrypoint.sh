@@ -14,9 +14,12 @@ BROWSER="${BROWSER_DIR:-data/browser}"
 # https://bugs.chromium.org/p/chromium/issues/detail?id=367048
 rm -f "/fgc/$BROWSER/SingletonLock"
 
-# Remove X server display lock, fix for `docker compose up` which reuses container which made it fail after initial run, https://github.com/vogler/free-games-claimer/issues/31
-# Maybe no longer needed after adding #478's -nolisten unix below
-rm -f /tmp/.X1-lock
+# Self-heal stale VNC/X locks. Fork fix for upstream #562 (open/unfixed): with restart: unless-stopped
+# docker reuses the same writable layer, so /tmp/.X11-unix/X1 + ~/.vnc/*:1.pid survive and vncserver
+# aborts with "already running as :1" (set -eo pipefail) BEFORE claims run -> silent infinite loop.
+# Upstream only removed /tmp/.X1-lock, which is insufficient. Clear all of them here.
+/opt/TurboVNC/bin/vncserver -kill :1 >/dev/null 2>&1 || true
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 ~/.vnc/*:1.pid ~/.vnc/*:1.log 2>/dev/null || true
 
 export DISPLAY=:1 # need to export this, otherwise playwright complains with 'Looks like you launched a headed browser without having a XServer running.'
 if [ -z "$VNC_PASSWORD" ]; then
@@ -25,7 +28,7 @@ if [ -z "$VNC_PASSWORD" ]; then
 else
 	# pw="-passwd $VNC_PASSWORD" # not supported anymore
 	pw="-rfbauth ~/.vnc/passwd"
-	mkdir ~/.vnc/
+	mkdir -p ~/.vnc/
 	echo "$VNC_PASSWORD" | /opt/TurboVNC/bin/vncpasswd -f >~/.vnc/passwd
 	pwt="with password"
 fi
