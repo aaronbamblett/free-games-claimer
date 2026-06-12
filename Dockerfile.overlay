@@ -4,5 +4,5 @@
 FROM ghcr.io/vogler/free-games-claimer:dev
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY src/ /fgc/src/
-COPY gog.js epic-games.js prime-gaming.js gog-imap-code.py /fgc/
+COPY gog.js epic-games.js prime-gaming.js gog-imap-code.py redeem-gog.js /fgc/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

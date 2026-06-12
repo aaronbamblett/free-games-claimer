@@ -11,7 +11,8 @@ export PATH="/usr/bin:/usr/sbin:/bin:/sbin:${PATH:-}"   # cron runs with a minim
 APPDIR="${FGC_APPDIR:-/mnt/pool/appdata/free-games-claimer}"
 DATA="$APPDIR/data"
 IMAGE="${FGC_IMAGE:-fgc-hardened:local}"
-PLATFORMS="${FGC_PLATFORMS:-node epic-games; node prime-gaming; node gog}"
+PLATFORMS="${FGC_PLATFORMS:-node epic-games; node prime-gaming; node gog; node redeem-gog}"
+REDEEM_MAX="${FGC_REDEEM_MAX:-5}"   # GOG keys to redeem per run — keep under GOG's captcha rate limit
 RUN_TIMEOUT="${FGC_TIMEOUT:-1200}"   # hard cap (s) so a hung run can never wedge
 SUMMARIZER="${FGC_SUMMARIZER:-$APPDIR/fgc-summarize.py}"
 HIST="$DATA/run-history.log"
@@ -42,6 +43,7 @@ log "run start (image=$IMAGE)"
 out=$(timeout "$RUN_TIMEOUT" docker run --rm --name fgc-oneshot \
         --env-file "$APPDIR/.env" \
         -e NOTIFY= \
+        -e REDEEM_MAX="$REDEEM_MAX" \
         -v "$DATA":/fgc/data \
         "$IMAGE" bash -c "$PLATFORMS" 2>&1)
 code=$?
@@ -62,12 +64,17 @@ crashed=0
 [ "$code" -eq 124 ] && crashed=1
 [ "$code" -ne 0 ] && [ "$code" -ne 124 ] && crashed=1
 
-log "run end code=$code claimed=$claimed problems=$problems manual=$manual crashed=$crashed"
+# --- GOG keys redeemed this run (redeem-gog.js prints "  Redeemed: <title>") ---
+redeemed_n=$(printf '%s\n' "$out" | grep -c "^  Redeemed:")
+redeemed_list=$(printf '%s\n' "$out" | sed -n 's/^  Redeemed: /• /p')
 
-# --- alert policy: notify on claim/problem (from diff) OR crash OR manual; silent on clean no-op ---
-if [ "$alert" = "True" ] || [ "$manual" -eq 1 ] || [ "$crashed" -eq 1 ]; then
+log "run end code=$code claimed=$claimed problems=$problems redeemed=$redeemed_n manual=$manual crashed=$crashed"
+
+# --- alert policy: notify on claim/problem/redeem OR crash OR manual; silent on clean no-op ---
+if [ "$alert" = "True" ] || [ "$redeemed_n" -gt 0 ] || [ "$manual" -eq 1 ] || [ "$crashed" -eq 1 ]; then
   msg="$body"
   [ -z "$msg" ] && msg="🎮 <b>free-games-claimer</b>"
+  [ "$redeemed_n" -gt 0 ] && msg+="${NL}🎁 <b>Redeemed $redeemed_n GOG key(s):</b>${NL}${redeemed_list}"
   if [ "$crashed" -eq 1 ]; then
     [ "$code" -eq 124 ] && msg+="${NL}⏱️ run hit the ${RUN_TIMEOUT}s timeout" || msg+="${NL}🔴 run crashed (exit $code)"
   fi
