@@ -23,7 +23,7 @@ What this fork adds over upstream:
 
 | Path | What |
 |---|---|
-| `~/src/free-games-claimer` (typhon) | the fork source (branch `hardened`) + `Dockerfile.overlay` |
+| `~/src/free-games-claimer` (your-host) | the fork source (branch `hardened`) + `Dockerfile.overlay` |
 | `/mnt/pool/appdata/free-games-claimer/` | deployment dir: `.env`, `data/`, and `fgc-run.sh` |
 | `/mnt/pool/appdata/free-games-claimer/data/` | persistent browser profile, per-platform result JSON DBs, run logs |
 | Docker image `fgc-hardened:local` | the built image (thin overlay over `ghcr.io/vogler/free-games-claimer:dev`) |
@@ -57,7 +57,7 @@ Key items (full details in `.env.example`):
 ## 2. First-time logins (one-time, via noVNC)
 
 Some platforms need a one-time interactive login. To watch/intervene, run with the noVNC port
-exposed and open **http://typhon:6080** in a browser:
+exposed and open **http://your-host:6080** in a browser:
 
 ```bash
 cd ~/src/free-games-claimer
