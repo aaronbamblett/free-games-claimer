@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # fgc-run.sh — run the hardened free-games-claimer once to completion, diff the per-platform
-# JSON result DBs, and alert via Telegram ONLY when something happened (claimed) or went wrong
-# (crash / failed claim / manual 2FA-captcha needed). Clean "nothing new" runs stay silent.
+# JSON result DBs, and send ONE clean Telegram message ONLY when something happened (a game was
+# claimed) or went wrong (failed claim / crash / manual 2FA-captcha). Clean no-op runs stay silent.
 #
-# Replaces the old `sleep 1d` + restart: unless-stopped self-loop with a fresh-container-per-run
-# model: a hung or crashed run can never become an infinite restart loop, and every run yields a
-# real exit code + a parsed summary. Schedule this daily (TrueNAS cron / systemd timer).
+# The in-container upstream notifier is suppressed (-e NOTIFY=) so this wrapper is the single,
+# deduplicated notification source. Fresh container per run -> the #562 restart loop can't recur.
 set -uo pipefail
 export PATH="/usr/bin:/usr/sbin:/bin:/sbin:${PATH:-}"   # cron runs with a minimal env
 
@@ -14,6 +13,7 @@ DATA="$APPDIR/data"
 IMAGE="${FGC_IMAGE:-fgc-hardened:local}"
 PLATFORMS="${FGC_PLATFORMS:-node epic-games; node prime-gaming; node gog}"
 RUN_TIMEOUT="${FGC_TIMEOUT:-1200}"   # hard cap (s) so a hung run can never wedge
+SUMMARIZER="${FGC_SUMMARIZER:-$APPDIR/fgc-summarize.py}"
 HIST="$DATA/run-history.log"
 LASTOUT="$DATA/last-run.log"
 NL=$'\n'
@@ -32,74 +32,46 @@ send_tg() {
        -d parse_mode=HTML >/dev/null 2>&1 || log "send_tg: curl failed"
 }
 
-# --- count entries by status across a platform JSON DB (nested user->game) ---
-count_status() {  # $1=jsonfile  $2=prefix(claimed|failed)
-  local f="$1" pfx="$2"
-  [ -f "$f" ] || { echo 0; return; }
-  python3 - "$f" "$pfx" <<'PY'
-import json,sys
-f,pfx=sys.argv[1],sys.argv[2]
-try: d=json.load(open(f))
-except Exception: print(0); sys.exit()
-def walk(o):
-    if isinstance(o,dict):
-        s=o.get("status")
-        if isinstance(s,str) and s.startswith(pfx): yield 1
-        for v in o.values(): yield from walk(v)
-    elif isinstance(o,list):
-        for v in o: yield from walk(v)
-print(sum(walk(d)))
-PY
-}
-
-declare -A B_CLAIM B_FAIL
+# --- snapshot result DBs before the run (for the before/after diff) ---
+SNAP=$(mktemp -d)
 for p in epic-games prime-gaming gog; do
-  B_CLAIM[$p]=$(count_status "$DATA/$p.json" claimed)
-  B_FAIL[$p]=$(count_status "$DATA/$p.json" failed)
+  cp "$DATA/$p.json" "$SNAP/$p.json" 2>/dev/null || true
 done
 
 log "run start (image=$IMAGE)"
 out=$(timeout "$RUN_TIMEOUT" docker run --rm --name fgc-oneshot \
         --env-file "$APPDIR/.env" \
+        -e NOTIFY= \
         -v "$DATA":/fgc/data \
         "$IMAGE" bash -c "$PLATFORMS" 2>&1)
 code=$?
 printf "%s\n" "$out" > "$LASTOUT"
 
-# --- per-platform deltas ---
-summary=""; problems=0; claimed_total=0
-for p in epic-games prime-gaming gog; do
-  ac=$(count_status "$DATA/$p.json" claimed); af=$(count_status "$DATA/$p.json" failed)
-  newc=$(( ac - ${B_CLAIM[$p]:-0} )); newf=$(( af - ${B_FAIL[$p]:-0} ))
-  [ "$newc" -lt 0 ] && newc=0; [ "$newf" -lt 0 ] && newf=0
-  claimed_total=$(( claimed_total + newc ))
-  line="$p: "
-  if [ "$newc" -gt 0 ]; then line+="🎁 claimed $newc "; else line+="— "; fi
-  if [ "$newf" -gt 0 ]; then line+="⚠️ failed $newf"; problems=$(( problems + 1 )); fi
-  summary+="${line}${NL}"
-done
+# --- summarize via before/after DB diff (deduplicated, game-name level) ---
+summary=$(python3 "$SUMMARIZER" "$SNAP" "$DATA" 2>/dev/null || echo '{}')
+rm -rf "$SNAP"
+alert=$(printf '%s' "$summary" | python3 -c "import json,sys;print(json.load(sys.stdin).get('alert',False))" 2>/dev/null || echo False)
+body=$(printf '%s' "$summary" | python3 -c "import json,sys;print(json.load(sys.stdin).get('text',''))" 2>/dev/null || echo "")
+claimed=$(printf '%s' "$summary" | python3 -c "import json,sys;print(json.load(sys.stdin).get('counts',{}).get('claimed',0))" 2>/dev/null || echo 0)
+problems=$(printf '%s' "$summary" | python3 -c "import json,sys;print(json.load(sys.stdin).get('counts',{}).get('problems',0))" 2>/dev/null || echo 0)
 
-# --- run-level problems from exit code + stdout markers ---
+# --- run-level signals from exit code + stdout markers ---
 manual=0
 echo "$out" | grep -qiE "Two-Step Verification|security code has been sent|got a captcha|hcaptcha" && manual=1
 crashed=0
-if [ "$code" -eq 124 ]; then crashed=1; summary+="⏱️ run hit ${RUN_TIMEOUT}s timeout${NL}"; fi
-if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then crashed=1; fi
+[ "$code" -eq 124 ] && crashed=1
+[ "$code" -ne 0 ] && [ "$code" -ne 124 ] && crashed=1
 
-log "run end code=$code claimed=$claimed_total problems=$problems manual=$manual crashed=$crashed"
+log "run end code=$code claimed=$claimed problems=$problems manual=$manual crashed=$crashed"
 
-# --- alert policy: notify on good news (claimed) OR any problem; silent on clean no-op ---
-if [ "$claimed_total" -gt 0 ] || [ "$problems" -gt 0 ] || [ "$manual" -eq 1 ] || [ "$crashed" -eq 1 ]; then
-  head="🎮 <b>free-games-claimer</b>"
+# --- alert policy: notify on claim/problem (from diff) OR crash OR manual; silent on clean no-op ---
+if [ "$alert" = "True" ] || [ "$manual" -eq 1 ] || [ "$crashed" -eq 1 ]; then
+  msg="$body"
+  [ -z "$msg" ] && msg="🎮 <b>free-games-claimer</b>"
   if [ "$crashed" -eq 1 ]; then
-    head="🔴 <b>free-games-claimer CRASHED</b> (exit $code)"
-  elif [ "$problems" -gt 0 ]; then
-    head="⚠️ <b>free-games-claimer: claim failures</b>"
-  elif [ "$manual" -eq 1 ]; then
-    head="🔐 <b>free-games-claimer needs you (2FA/captcha)</b>"
+    [ "$code" -eq 124 ] && msg+="${NL}⏱️ run hit the ${RUN_TIMEOUT}s timeout" || msg+="${NL}🔴 run crashed (exit $code)"
   fi
-  msg="${head}${NL}${summary}"
-  [ "$manual" -eq 1 ] && msg+="${NL}A login needs a manual code/captcha. Open noVNC or check the run log."
+  [ "$manual" -eq 1 ] && msg+="${NL}🔐 a login needs a manual code/captcha — open noVNC or check the run log."
   send_tg "$msg"
   log "alert sent"
 else
