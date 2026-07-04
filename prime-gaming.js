@@ -193,19 +193,26 @@ try {
     if (cfg.dryrun) continue;
     if (cfg.interactive && !await confirm()) continue;
     await Promise.any([page.click('[data-a-target="buy-box"] .tw-button:has-text("Get game")'), page.click('[data-a-target="buy-box"] .tw-button:has-text("Claim")'), page.click('.tw-button:has-text("Complete Claim")'), page.waitForSelector('div:has-text("Link game account")'), page.waitForSelector('.thank-you-title:has-text("Success")')]); // waits for navigation
+    // Epic (and some stores) show an intermediate confirm even for a LINKED account: Claim -> Continue
+    // -> "Go to Epic Games" (see the DLC path below + its "Fall Guys" note). The DLC path clicks through
+    // Continue; the games path historically did not, so a linked game that only needed a Continue click
+    // hit the "Link account" check and was wrongly marked `failed: need account linking`. Click Continue
+    // first (no-op if absent), then decide. The cross-site "Go to Epic Games" step is CAPTURED below,
+    // not clicked blind — no live offer ever existed to observe it, so gather evidence before coding it.
+    await page.click('button:has-text("Continue")').catch(_ => {});
+    await page.waitForTimeout(1500); // let any post-Continue navigation/state settle
+    try { // capture live claim DOM+screenshot so the next real Epic offer leaves exact evidence to finish this
+      await page.screenshot({ path: screenshot('external', `claimflow-${filenamify(title)}.png`), fullPage: true });
+      (await import('fs')).writeFileSync(resolve(cfg.dir.screenshots, 'prime-gaming', `claimflow-${filenamify(title)}.html`), await page.content());
+    } catch (e) { console.error('  claimflow capture failed:', e.message); }
     db.data[user][title] ||= { title, time: datetime(), url, store };
     const notify_game = { title, url };
     notify_games.push(notify_game); // status is updated below
-    if (await page.locator('div:has-text("Link game account")').count() // TODO still needed? epic games store just has 'Link account' as the button text now.
-       || await page.locator('div:has-text("Link account")').count()) {
+    if (await page.locator('div:has-text("Link game account")').count() // epic-games specific unlinked banner
+       || await page.locator('[data-a-target="LinkAccountButton"]').count()) { // authoritative unlinked signal (a real CTA button), same as the DLC path — not stray "Link account" text elsewhere on the page
       console.error('  Account linking is required to claim this offer!');
       notify_game.status = `failed: need account linking for ${store}`;
       db.data[user][title].status = 'failed: need account linking';
-      // await page.pause();
-      // await page.click('[data-a-target="LinkAccountModal"] [data-a-target="LinkAccountButton"]');
-      // TODO login for epic games also needed if already logged in
-      // wait for https://www.epicgames.com/id/authorize?redirect_uri=https%3A%2F%2Fservice.link.amazon.gg...
-      // await page.click('button[aria-label="Allow"]');
     } else {
       db.data[user][title].status = 'claimed';
       // print code if there is one
