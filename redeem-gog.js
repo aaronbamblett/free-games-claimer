@@ -30,6 +30,7 @@ async function fetchClearanceCookies(targetUrl) {
 
 console.log(datetime(), 'started redeeming GOG keys from Prime');
 const REDEEM_MAX = parseInt(process.env.REDEEM_MAX || '0', 10); // 0 = no limit
+const REDEEM_DELAY_MS = parseInt(process.env.REDEEM_DELAY_MS || '25000', 10); // pause between redeems
 const DONE = new Set(['claimed and redeemed', 'redeem: not found', 'redeem: expired']);
 
 // The "Continue"/"Redeem" button is disabled until the code field validates client-side
@@ -149,6 +150,14 @@ for (const g of pending) {
       console.log(`  Redeemed: ${prod}`);
       g.status = 'claimed and redeemed';
       redeemed++;
+      // Let the success page settle, then cool down before the next code so GOG's
+      // rate limiter is not tripped (captcha on 2nd+ key, observed 2026-10-20).
+      // Skipped after the last code of this run.
+      try { await page.waitForLoadState('load', { timeout: 15000 }); } catch (_) { /* settle is best-effort */ }
+      if (n < pending.length && (!REDEEM_MAX || n < REDEEM_MAX)) {
+        console.log(`  cooling down ${REDEEM_DELAY_MS}ms before next code (GOG rate limit)`);
+        await page.waitForTimeout(REDEEM_DELAY_MS);
+      }
     } else if (r2?.reason?.includes('captcha')) {
       console.error(`  ${g.title}: GOG captcha on redeem (rate limit) — stopping this run`); failed++; break;
     } else {
