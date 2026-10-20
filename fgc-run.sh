@@ -11,7 +11,12 @@ export PATH="/usr/bin:/usr/sbin:/bin:/sbin:${PATH:-}"   # cron runs with a minim
 APPDIR="${FGC_APPDIR:-/mnt/pool/appdata/free-games-claimer}"
 DATA="$APPDIR/data"
 IMAGE="${FGC_IMAGE:-fgc-hardened:local}"
-PLATFORMS="${FGC_PLATFORMS:-node epic-games; node prime-gaming; node gog; node redeem-gog}"
+# Steps run sequentially in ONE container (shared browser profile). Each step emits an
+# "FGC_RC <step> <rc>" marker so the wrapper can tell a real claim-step crash from a benign
+# redeem hiccup — a bash `;` chain's exit code only reflects the LAST step, which hid both
+# earlier-step crashes and made a transient redeem-gog failure look like a whole-run crash.
+STEPS="${FGC_STEPS:-epic-games prime-gaming gog redeem-gog}"
+CLAIM_STEPS="epic-games prime-gaming gog"   # a non-zero from any of these = a real crash
 REDEEM_MAX="${FGC_REDEEM_MAX:-5}"   # GOG keys to redeem per run — keep under GOG's captcha rate limit
 RUN_TIMEOUT="${FGC_TIMEOUT:-1200}"   # hard cap (s) so a hung run can never wedge
 SUMMARIZER="${FGC_SUMMARIZER:-$APPDIR/fgc-summarize.py}"
@@ -40,12 +45,15 @@ for p in epic-games prime-gaming gog; do
 done
 
 log "run start (image=$IMAGE)"
+# Build a marker-emitting command: run each step, then echo its exit code on a tagged line.
+runcmd=""
+for s in $STEPS; do runcmd+="node $s; echo \"FGC_RC $s \$?\"; "; done
 out=$(timeout "$RUN_TIMEOUT" docker run --rm --name fgc-oneshot \
         --env-file "$APPDIR/.env" \
         -e NOTIFY= \
         -e REDEEM_MAX="$REDEEM_MAX" \
         -v "$DATA":/fgc/data \
-        "$IMAGE" bash -c "$PLATFORMS" 2>&1)
+        "$IMAGE" bash -c "$runcmd" 2>&1)
 code=$?
 printf "%s\n" "$out" > "$LASTOUT"
 
@@ -57,31 +65,69 @@ body=$(printf '%s' "$summary" | python3 -c "import json,sys;print(json.load(sys.
 claimed=$(printf '%s' "$summary" | python3 -c "import json,sys;print(json.load(sys.stdin).get('counts',{}).get('claimed',0))" 2>/dev/null || echo 0)
 problems=$(printf '%s' "$summary" | python3 -c "import json,sys;print(json.load(sys.stdin).get('counts',{}).get('problems',0))" 2>/dev/null || echo 0)
 
+# --- per-step exit codes from the FGC_RC markers ---
+declare -A RC
+while read -r _ step rc; do RC["$step"]="$rc"; done < <(printf '%s\n' "$out" | grep '^FGC_RC ')
+marker_count=$(printf '%s\n' "$out" | grep -c '^FGC_RC ')
+
+# A crash means a CLAIM step (epic/prime/gog) failed, the whole run timed out, or the
+# container died before any step reported (infra failure). A redeem-gog non-zero is NOT a
+# crash — it's handled as a soft notice below.
+claim_crash=0
+for s in $CLAIM_STEPS; do [ "${RC[$s]:-0}" -ne 0 ] && claim_crash=1; done
+redeem_rc="${RC[redeem-gog]:-0}"
+deferred=0
+printf '%s\n' "$out" | grep -q "REDEEM_DEFERRED:" && deferred=1
+
 # --- run-level signals from exit code + stdout markers ---
 manual=0
 echo "$out" | grep -qiE "Two-Step Verification|security code has been sent|got a captcha|hcaptcha" && manual=1
 crashed=0
-[ "$code" -eq 124 ] && crashed=1
-[ "$code" -ne 0 ] && [ "$code" -ne 124 ] && crashed=1
+[ "$code" -eq 124 ] && crashed=1                                   # whole-run hard timeout
+[ "$claim_crash" -eq 1 ] && crashed=1                              # a claim step failed
+[ "$code" -ne 0 ] && [ "$code" -ne 124 ] && [ "$marker_count" -eq 0 ] && crashed=1  # container died before any step ran
 
 # --- GOG keys redeemed this run (redeem-gog.js prints "  Redeemed: <title>") ---
 redeemed_n=$(printf '%s\n' "$out" | grep -c "^  Redeemed:")
 redeemed_list=$(printf '%s\n' "$out" | sed -n 's/^  Redeemed: /• /p')
 
-log "run end code=$code claimed=$claimed problems=$problems redeemed=$redeemed_n manual=$manual crashed=$crashed"
+# Parse redeem-gog's summary line: "REDEEM_SUMMARY redeemed=R already=A expired=E failed=F".
+# A genuine failure (failed>0, e.g. timeout/captcha/unexpected) is a REAL problem worth an
+# alert — this is the silent-failure hole. An expired/terminal code is informational (the key
+# is now marked done and won't retry), worth a one-time heads-up.
+sumline=$(printf '%s\n' "$out" | grep -m1 '^REDEEM_SUMMARY ')
+redeem_failed=$(printf '%s' "$sumline" | sed -n 's/.*failed=\([0-9]\{1,\}\).*/\1/p'); redeem_failed=${redeem_failed:-0}
+redeem_expired=$(printf '%s' "$sumline" | sed -n 's/.*expired=\([0-9]\{1,\}\).*/\1/p'); redeem_expired=${redeem_expired:-0}
+# A redeem step that died with no summary and no deferral marker is itself a failure.
+[ -z "$sumline" ] && [ "$deferred" -eq 0 ] && [ "$redeem_rc" -ne 0 ] && redeem_failed=$((redeem_failed + 1))
+redeem_problem=0
+[ "$redeem_failed" -gt 0 ] && redeem_problem=1
 
-# --- alert policy: notify on claim/problem/redeem OR crash OR manual; silent on clean no-op ---
-if [ "$alert" = "True" ] || [ "$redeemed_n" -gt 0 ] || [ "$manual" -eq 1 ] || [ "$crashed" -eq 1 ]; then
+log "run end code=$code claim_crash=$claim_crash redeem_rc=$redeem_rc deferred=$deferred redeem_failed=$redeem_failed redeem_expired=$redeem_expired claimed=$claimed problems=$problems redeemed=$redeemed_n manual=$manual crashed=$crashed"
+
+# --- alert policy: notify on claim/problem/redeem OR crash OR manual OR an unexpected
+#     redeem error; a clean no-op and a benign GOG-deferral both stay silent. ---
+if [ "$alert" = "True" ] || [ "$redeemed_n" -gt 0 ] || [ "$manual" -eq 1 ] || [ "$crashed" -eq 1 ] || [ "$redeem_problem" -eq 1 ] || [ "$redeem_expired" -gt 0 ]; then
   msg="$body"
   [ -z "$msg" ] && msg="🎮 <b>free-games-claimer</b>"
   [ "$redeemed_n" -gt 0 ] && msg+="${NL}🎁 <b>Redeemed $redeemed_n GOG key(s):</b>${NL}${redeemed_list}"
   if [ "$crashed" -eq 1 ]; then
-    [ "$code" -eq 124 ] && msg+="${NL}⏱️ run hit the ${RUN_TIMEOUT}s timeout" || msg+="${NL}🔴 run crashed (exit $code)"
+    [ "$code" -eq 124 ] && msg+="${NL}⏱️ run hit the ${RUN_TIMEOUT}s timeout" || msg+="${NL}🔴 a claim step crashed — check the run log."
   fi
   [ "$manual" -eq 1 ] && msg+="${NL}🔐 a login needs a manual code/captcha — open noVNC or check the run log."
+  [ "$redeem_problem" -eq 1 ] && msg+="${NL}⚠️ GOG redeem FAILED for $redeem_failed key(s) (timeout/captcha/unexpected) — check the run log."
+  [ "$redeem_expired" -gt 0 ] && msg+="${NL}ℹ️ $redeem_expired Prime→GOG code(s) had already EXPIRED before redemption — now marked done, won't retry."
+  # If we're already alerting for another reason, mention any benign deferral for context.
+  [ "$deferred" -eq 1 ] && msg+="${NL}⏭️ GOG redeem deferred (gog.com unreachable) — keys retry next run."
   send_tg "$msg"
   log "alert sent"
 else
+  [ "$deferred" -eq 1 ] && log "GOG redeem deferred — keys carry to next run (silent)"
   log "clean run, nothing new — no alert"
 fi
-exit "$code"
+
+# Exit non-zero only on a real crash, so the cron's own failure signal stays meaningful.
+if [ "$crashed" -eq 1 ]; then
+  [ "$code" -eq 124 ] && exit 124 || exit 1
+fi
+exit 0
