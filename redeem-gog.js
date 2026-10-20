@@ -36,8 +36,19 @@ const DONE = new Set(['claimed and redeemed', 'redeem: not found', 'redeem: expi
 // (Angular). Clicking before it enables fires no request, so the validate waitForResponse
 // times out (observed 2026-06-24). Wait for the enabled button, then click.
 async function clickWhenEnabled(page, sel = '[type="submit"]') {
-  await page.locator(`${sel}:not([disabled])`).first().waitFor({ state: 'visible', timeout: 20000 });
-  await page.locator(sel).first().click();
+  const enabled = `${sel}:not([disabled])`;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const handle = await page.waitForSelector(enabled, { state: 'visible', timeout: 20000 });
+      await handle.click();
+      return;
+    } catch (e) {
+      const msg = e.message || String(e);
+      const retryable = msg.includes('detached') || msg.includes('Execution context was destroyed')
+        || msg.includes('navigat');
+      if (attempt === 2 || !retryable) throw e;
+    }
+  }
 }
 
 const pdb = await jsonDb('prime-gaming.json', {});
