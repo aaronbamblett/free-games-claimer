@@ -284,16 +284,63 @@ try {
       }).catch(_ => { });
 
       // it then creates an iframe for the purchase
-      // or, if the store only shows a cached display name, Epic redirects to its login page
+      // or Epic demands step-up 2FA at purchase time even with a valid session:
+      // Get bounces store -> /id/login -> /id/login/mfa (6-digit authenticator
+      // code) -> back to store.epicgames.com/p/<game>?purchaseIntentId=... and
+      // the checkout continues. Only a login bounce that stalls is a dead session.
       await Promise.race([
         page.waitForSelector(checkoutSel), // TODO needed?
         page.waitForURL(/epicgames\.com\/id\/login/),
       ]);
       if (page.url().includes('/id/login')) {
-        await page.waitForTimeout(5000); // tolerate a transient SSO bounce through login
-      }
-      if (page.url().includes('/id/login')) {
-        throw new Error('epic-games session expired (redirected to /id/login on Get)');
+        console.log(`  NAV Get bounced to /id/login: ${page.url()}`);
+        // Wait ~20 s for the bounce to progress to step-up MFA or back to the
+        // store (transient SSO bounce); anything else means the session is gone.
+        await Promise.race([
+          page.waitForURL('**/id/login/mfa**', { timeout: 20000 }).catch(() => { }),
+          page.waitForURL(/store\.epicgames\.com\/p\//, { timeout: 20000 }).catch(() => { }),
+          page.waitForTimeout(20000),
+        ]);
+        const onMfa = page.url().includes('/id/login/mfa');
+        const backOnStore = page.url().includes('store.epicgames.com/p/');
+        console.log(`  NAV after ~20 s wait: ${page.url()}`);
+        if (!onMfa && !backOnStore) {
+          if (await page.locator('#password, input[type="password"], #email').count() > 0) {
+            throw new Error('epic-games session expired (redirected to /id/login on Get, landed on password/email form)');
+          }
+          throw new Error('epic-games session expired (redirected to /id/login on Get, no MFA or store return within ~20 s)');
+        }
+        if (onMfa) {
+          console.log('  NAV reached step-up 2FA at checkout (/id/login/mfa)');
+          if (!cfg.eg_otpkey) {
+            throw new Error('Epic requires 2FA at checkout: set EG_OTPKEY');
+          }
+          // Generate a fresh code; if inside ~3 s of the 30 s rollover, wait
+          // for the next window so the code does not expire mid-submit.
+          const msIntoWindow = Date.now() % 30000;
+          if (msIntoWindow > 27000) {
+            console.log('  Step-up 2FA code near rollover, waiting for next window...');
+            await page.waitForTimeout(30000 - msIntoWindow + 1000);
+          }
+          const otp = authenticator.generate(cfg.eg_otpkey);
+          await page.locator('input[name="code-input-0"]').waitFor();
+          await page.locator('input[name="code-input-0"]').pressSequentially(otp.toString());
+          await page.click('button[type="submit"]');
+          console.log('  Submitted step-up 2FA code ******, waiting to return to store...');
+          await Promise.race([
+            page.waitForURL(/purchaseIntentId=/, { timeout: 60000 }).catch(() => { }),
+            page.waitForSelector(checkoutSel, { timeout: 60000 }).catch(() => { }),
+          ]);
+          console.log(`  NAV after step-up 2FA submit: ${page.url()}`);
+          if (!page.url().includes('store.epicgames.com/p/') && (await page.locator(checkoutSel).count()) === 0) {
+            throw new Error('Epic step-up 2FA at checkout did not return to the store (code may have been rejected)');
+          }
+          console.log('  NAV back on store with purchaseIntentId, continuing normal checkout');
+        } else {
+          console.log('  NAV transient SSO bounce resolved back to store, continuing checkout');
+        }
+        await page.waitForSelector(checkoutSel);
+        console.log('  NAV checkout iframe found, continuing normal checkout');
       }
       const iframe = page.frameLocator(checkoutSel).first();
       // skip game if unavailable in region, https://github.com/vogler/free-games-claimer/issues/46 TODO check games for account's region
@@ -315,7 +362,7 @@ try {
 
       if (cfg.debug) await page.pause();
       if (cfg.dryrun) {
-        console.log('  DRYRUN=1 -> Skip order!');
+        console.log('  DRYRUN=1 -> Skip order (checkout ready, stopping before Place Order)!');
         notify_game.status = 'skipped';
         if (cfg.time) console.timeEnd('claim game');
         continue;
@@ -394,7 +441,10 @@ try {
       notify_game ??= { title: game.title, url, status: 'failed' };
       notify_game.status = 'failed';
       if (!notify_games.includes(notify_game)) notify_games.push(notify_game);
-      if (page.url().includes('/id/login')) {
+      // Only a genuine session-expiry error aborts the epic step. Per-game
+      // failures (e.g. step-up 2FA rejected, or EG_OTPKEY unset) must not:
+      // the session is still valid, so keep claiming the remaining games.
+      if (e.message?.startsWith('epic-games session expired') && page.url().includes('/id/login')) {
         console.error('  Session expired: Epic asks to sign in again before claiming.');
         sessionLost = true;
       }
