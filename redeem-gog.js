@@ -84,17 +84,22 @@ try {
   console.error('FlareSolverr cookie injection failed:', e.message ? e.message.split('\n')[0] : e);
 }
 
-// gog.com sits behind Cloudflare and routinely flakes its first load, so retry the
-// login check a few times before giving up. Failing to confirm login is NOT a crash:
-// the daily `node gog` step refreshes the session, so any unredeemed keys simply carry
-// to the next run. Exit 0 on deferral so the wrapper never reports a false crash.
-let isLoggedIn = false;
+// Confirm login via userData.json instead of GOG's changing menu markup (the
+// .js-menu-account header element is gone since ~10/2026). gog.com sits behind
+// Cloudflare and routinely flakes its first load, so retry a few times before
+// giving up. Failing to confirm login is NOT a crash: the daily `node gog` step
+// refreshes the session, so any unredeemed keys simply carry to the next run.
+// Exit 0 on deferral so the wrapper never reports a false crash.
+let isLoggedIn = false, gogUser = '';
 const LOGIN_TRIES = 3;
 for (let attempt = 1; attempt <= LOGIN_TRIES && !isLoggedIn; attempt++) {
   try {
     await page.goto('https://www.gog.com/en', { waitUntil: 'domcontentloaded' });
-    await page.locator('.js-menu-account').first().waitFor({ state: 'attached', timeout: 20000 });
-    isLoggedIn = true;
+    const uResp = await context.request.get('https://www.gog.com/userData.json');
+    if (!uResp.ok()) throw new Error(`userData.json HTTP ${uResp.status()}`);
+    const uAccount = await uResp.json();
+    if (uAccount && uAccount.isLoggedIn) { isLoggedIn = true; gogUser = uAccount.username || ''; }
+    else throw new Error('GOG session not logged in');
   } catch (e) {
     console.error(`GOG login check attempt ${attempt}/${LOGIN_TRIES} failed:`, e.message ? e.message.split('\n')[0] : e);
     if (attempt < LOGIN_TRIES) await page.waitForTimeout(3000);
@@ -104,6 +109,7 @@ if (!isLoggedIn) {
   console.log(`REDEEM_DEFERRED: GOG not confirmed logged-in after ${LOGIN_TRIES} tries — deferring ${pending.length} pending key(s) to next run.`);
   await context.close(); process.exit(0);
 }
+console.log(`Signed in as ${gogUser || 'gog-user'}`);
 
 let redeemed = 0, already = 0, expired = 0, failed = 0, n = 0;
 for (const g of pending) {
@@ -123,6 +129,7 @@ for (const g of pending) {
     if (r1.reason === 'code_expired') { console.log(`  ${g.title}: code EXPIRED — marking terminal`); g.status = 'redeem: expired'; expired++; continue; }
     if (r1.reason === 'code_not_found') { console.log(`  ${g.title}: code not found — marking terminal`); g.status = 'redeem: not found'; expired++; continue; }
     const prod = r1.products?.[0]?.title || g.title;
+    if (cfg.dryrun) { console.log(`  DRYRUN=1 -> ${prod}: code validates, skipping redeem submit`); continue; }
     const r2p = page.waitForResponse(r => r.request().method() === 'POST' && r.url().startsWith('https://redeem.gog.com/'), { timeout: 45000 });
     await clickWhenEnabled(page); // Redeem (consume)
     const r2 = JSON.parse(await (await r2p).text());
