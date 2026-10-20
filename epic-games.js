@@ -290,6 +290,9 @@ try {
         page.waitForURL(/epicgames\.com\/id\/login/),
       ]);
       if (page.url().includes('/id/login')) {
+        await page.waitForTimeout(5000); // tolerate a transient SSO bounce through login
+      }
+      if (page.url().includes('/id/login')) {
         throw new Error('epic-games session expired (redirected to /id/login on Get)');
       }
       const iframe = page.frameLocator(checkoutSel).first();
