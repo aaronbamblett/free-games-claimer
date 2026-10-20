@@ -168,6 +168,7 @@ try {
 
   console.log('Free games:', urls);
 
+  let sessionLost = false; // set when a claim lands on /id/login: session died mid-run
   for (const url of urls) {
     if (cfg.time) console.time('claim game');
     const game_id = url.split('/').pop();
@@ -189,16 +190,25 @@ try {
       if (cfg.time) console.timeEnd('claim game');
       continue;
     }
+    // Epic's 10/2026 store redesign dropped data-testid="purchase-cta-button" and
+    // #webPurchaseContainer. Try the old selectors first (revert/A-B safe), then the
+    // new ones: PR #596's hashed sidebar class, feldorn v2.12.11's unlabelled
+    // sidebar button (Add to Cart / Wishlist carry aria-labels).
+    const purchaseSel = 'button[data-testid="purchase-cta-button"], button[class*="_sidebarBuyButton_"], section[class*="_sidebar_"] button:not([aria-label])';
+    const checkoutSel = '#webPurchaseContainer iframe, iframe[src*="/checkout?purchaseToken="]';
+    let notify_game; // assigned in try, read in catch when an early failure skips it
+    try {
     await page.goto(url); // , { waitUntil: 'domcontentloaded' });
     // when loading, the button text is empty -> need to wait for some text {'get', 'in library', 'requires base game'} -> just wait for e or i to not be too specific; :text-matches("\w+") somehow didn't work - https://github.com/vogler/free-games-claimer/issues/375
     // was using locator('...').first().waitFor(), but that at some point led to exception locator.waitFor: Error: Can't query n-th element
     await page.waitForFunction(
-      () => {
-        const btn = document.querySelector('button[data-testid="purchase-cta-button"]');
+      sel => {
+        const btn = document.querySelector(sel);
         return btn && /[ei]/i.test(btn.textContent) && btn.textContent != 'Loading';
-      }
+      },
+      purchaseSel,
     );
-    const purchaseBtn = page.locator('button[data-testid="purchase-cta-button"]').first();
+    const purchaseBtn = page.locator(purchaseSel).first();
     const btnText = (await purchaseBtn.innerText()).toLowerCase(); // barrier to block until page is loaded
 
     // click Continue if 'This game contains mature content recommended only for ages 18+'
@@ -220,7 +230,7 @@ try {
     let title;
     let bundle_includes;
     if (await page.locator('span:text-is("About Bundle")').count()) {
-      title = (await page.locator('span:has-text("Buy"):left-of([data-testid="purchase-cta-button"])').first().innerText()).replace('Buy ', '');
+      title = (await page.locator(`span:has-text("Buy"):left-of(:is(${purchaseSel}))`).first().innerText()).replace('Buy ', '');
       // h1 first didn't exist for bundles but now it does... However h1 would e.g. be 'Fallout® Classic Collection' instead of 'Fallout Classic Collection'
       try {
         bundle_includes = await Promise.all((await page.locator('.product-card-top-row h5').all()).map(b => b.innerText()));
@@ -234,7 +244,7 @@ try {
 
     console.log('Current free game:', chalk.blue(title));
     if (bundle_includes) console.log('  This bundle includes:', bundle_includes);
-    const notify_game = { title, url, status: 'failed' };
+    notify_game = { title, url, status: 'failed' };
     notify_games.push(notify_game); // status is updated below
 
     if (btnText == 'in library') {
@@ -274,8 +284,15 @@ try {
       }).catch(_ => { });
 
       // it then creates an iframe for the purchase
-      await page.waitForSelector('#webPurchaseContainer iframe'); // TODO needed?
-      const iframe = page.frameLocator('#webPurchaseContainer iframe');
+      // or, if the store only shows a cached display name, Epic redirects to its login page
+      await Promise.race([
+        page.waitForSelector(checkoutSel), // TODO needed?
+        page.waitForURL(/epicgames\.com\/id\/login/),
+      ]);
+      if (page.url().includes('/id/login')) {
+        throw new Error('epic-games session expired (redirected to /id/login on Get)');
+      }
+      const iframe = page.frameLocator(checkoutSel).first();
       // skip game if unavailable in region, https://github.com/vogler/free-games-claimer/issues/46 TODO check games for account's region
       if (await iframe.locator(':has-text("unavailable in your region")').count() > 0) {
         console.error('  This product is unavailable in your region!');
@@ -344,7 +361,11 @@ try {
           console.error('  Failed to challenge captcha, please try again later.');
           await notify('epic-games: failed to challenge captcha. Please check.');
         }).catch(_ => { });
-        await page.locator("text=/Thanks for your order!|It.s all yours|In Library/").waitFor({ state: 'attached' }); // Epic changed free checkout success copy in 2026.
+        await Promise.any([
+          page.locator("text=It's all yours").waitFor({ state: 'attached' }),
+          page.locator("text=Download the Epic Games Launcher to play").waitFor({ state: 'attached' }),
+          page.locator("text=Is Epic Games Launcher installed?").waitFor({ state: 'attached' })
+        ]);
         game.status = 'claimed';
         game.time = datetime(); // claimed time overwrites failed/dryrun time
         console.log('  Claimed successfully!');
@@ -362,8 +383,23 @@ try {
       const p = screenshot(`${game_id}.png`);
       if (!existsSync(p)) await page.screenshot({ path: p, fullPage: false }); // fullPage is quite long...
     }
+    } catch (e) {
+      // One failed game must not abort the whole epic step: mark it and move on.
+      console.error(`  Failed on ${url}:`, e.message ? e.message.split('\n')[0] : e);
+      game = db.data[user][game_id] ??= { title: game_id, time: datetime(), url };
+      if (game.status != 'claimed') game.status = 'failed';
+      notify_game ??= { title: game.title, url, status: 'failed' };
+      notify_game.status = 'failed';
+      if (!notify_games.includes(notify_game)) notify_games.push(notify_game);
+      if (page.url().includes('/id/login')) {
+        console.error('  Session expired: Epic asks to sign in again before claiming.');
+        sessionLost = true;
+      }
+    }
+    if (sessionLost) break;
     if (cfg.time) console.timeEnd('claim game');
   }
+  if (sessionLost) throw new Error('epic-games session expired (redirected to /id/login) - re-login in the browser');
 } catch (error) {
   process.exitCode ||= 1;
   console.error('--- Exception:');
