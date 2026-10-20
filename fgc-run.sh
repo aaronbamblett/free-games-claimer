@@ -17,7 +17,7 @@ IMAGE="${FGC_IMAGE:-fgc-hardened:local}"
 # earlier-step crashes and made a transient redeem-gog failure look like a whole-run crash.
 STEPS="${FGC_STEPS:-epic-games prime-gaming gog redeem-gog}"
 CLAIM_STEPS="epic-games prime-gaming gog"   # a non-zero from any of these = a real crash
-REDEEM_MAX="${FGC_REDEEM_MAX:-5}"   # GOG keys to redeem per run — keep under GOG's captcha rate limit
+REDEEM_MAX="${REDEEM_MAX:-${FGC_REDEEM_MAX:-5}}"   # exported REDEEM_MAX wins, then FGC_REDEEM_MAX, default 5
 RUN_TIMEOUT="${FGC_TIMEOUT:-1200}"   # hard cap (s) so a hung run can never wedge
 SUMMARIZER="${FGC_SUMMARIZER:-$APPDIR/fgc-summarize.py}"
 HIST="$DATA/run-history.log"
