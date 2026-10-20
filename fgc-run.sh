@@ -105,9 +105,55 @@ redeem_problem=0
 
 log "run end code=$code claim_crash=$claim_crash redeem_rc=$redeem_rc deferred=$deferred redeem_failed=$redeem_failed redeem_expired=$redeem_expired claimed=$claimed problems=$problems redeemed=$redeemed_n manual=$manual crashed=$crashed"
 
+# --- stalled GOG redemption alert: Prime->GOG keys pending 3+ days, or redeem
+#     deferred 3 runs in a row. Both used to stay silent indefinitely. ---
+STALLED_DAYS="${FGC_STALLED_DAYS:-3}"
+STALLED_STREAK="${FGC_STALLED_STREAK:-3}"
+stalled_list=$(python3 - "$DATA/prime-gaming.json" "$STALLED_DAYS" 2>/dev/null <<'EOF'
+import json, sys, datetime
+TERMINAL = {'claimed and redeemed', 'redeem: not found', 'redeem: expired'}
+try:
+    db = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+days = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+out = []
+if isinstance(db, dict):
+    for games in db.values():
+        if not isinstance(games, dict):
+            continue
+        for gid, g in games.items():
+            if not isinstance(g, dict) or not g.get('code'):
+                continue
+            if 'gog' not in str(g.get('store', '')):
+                continue
+            if str(g.get('status', '')) in TERMINAL:
+                continue
+            try:
+                t = datetime.datetime.strptime(str(g.get('time', ''))[:19], '%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                continue
+            if t < cutoff:
+                out.append('• %s (pending since %s)' % (g.get('title', gid), str(g.get('time', ''))[:10]))
+print('\n'.join(out))
+EOF
+)
+streak=0
+while read -r hline; do
+  case "$hline" in
+    *deferred=1*) streak=$((streak + 1)) ;;
+    *) break ;;
+  esac
+done < <(grep 'run end ' "$HIST" 2>/dev/null | tail -"$STALLED_STREAK" | tac)
+stalled=0
+[ -n "$stalled_list" ] && stalled=1
+[ "$STALLED_STREAK" -gt 0 ] && [ "$streak" -ge "$STALLED_STREAK" ] && stalled=1
+
 # --- alert policy: notify on claim/problem/redeem OR crash OR manual OR an unexpected
-#     redeem error; a clean no-op and a benign GOG-deferral both stay silent. ---
-if [ "$alert" = "True" ] || [ "$redeemed_n" -gt 0 ] || [ "$manual" -eq 1 ] || [ "$crashed" -eq 1 ] || [ "$redeem_problem" -eq 1 ] || [ "$redeem_expired" -gt 0 ]; then
+#     redeem error OR stalled GOG redemption; a clean no-op and a benign
+#     short GOG-deferral stay silent. ---
+if [ "$alert" = "True" ] || [ "$redeemed_n" -gt 0 ] || [ "$manual" -eq 1 ] || [ "$crashed" -eq 1 ] || [ "$redeem_problem" -eq 1 ] || [ "$redeem_expired" -gt 0 ] || [ "$stalled" -eq 1 ]; then
   msg="$body"
   [ -z "$msg" ] && msg="🎮 <b>free-games-claimer</b>"
   [ "$redeemed_n" -gt 0 ] && msg+="${NL}🎁 <b>Redeemed $redeemed_n GOG key(s):</b>${NL}${redeemed_list}"
@@ -118,7 +164,9 @@ if [ "$alert" = "True" ] || [ "$redeemed_n" -gt 0 ] || [ "$manual" -eq 1 ] || [ 
   [ "$redeem_problem" -eq 1 ] && msg+="${NL}⚠️ GOG redeem FAILED for $redeem_failed key(s) (timeout/captcha/unexpected) — check the run log."
   [ "$redeem_expired" -gt 0 ] && msg+="${NL}ℹ️ $redeem_expired Prime→GOG code(s) had already EXPIRED before redemption — now marked done, won't retry."
   # If we're already alerting for another reason, mention any benign deferral for context.
-  [ "$deferred" -eq 1 ] && msg+="${NL}⏭️ GOG redeem deferred (gog.com unreachable) — keys retry next run."
+  [ "$deferred" -eq 1 ] && [ "$stalled" -eq 0 ] && msg+="${NL}⏭️ GOG redeem deferred (gog.com unreachable) — keys retry next run."
+  [ "$stalled" -eq 1 ] && [ "$streak" -ge "$STALLED_STREAK" ] && [ "$STALLED_STREAK" -gt 0 ] && msg+="${NL}⏳ GOG redeem deferred $streak runs in a row — check the run log."
+  [ -n "$stalled_list" ] && msg+="${NL}⏳ Prime→GOG key(s) pending ${STALLED_DAYS}+ days:${NL}${stalled_list}"
   send_tg "$msg"
   log "alert sent"
 else
